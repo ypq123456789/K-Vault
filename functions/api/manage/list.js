@@ -196,17 +196,23 @@ function buildFolderNodes(files, folderMarkers = []) {
   });
 }
 
-async function listAllKeys(env, prefix = '') {
+async function listAllKeys(env, prefix = '', maxKeys = Infinity) {
   const allKeys = [];
   let cursor = undefined;
   let guard = 0;
 
   do {
-    const page = await env.img_url.list({ limit: 1000, cursor, prefix: prefix || undefined });
+    const remaining = maxKeys - allKeys.length;
+    if (remaining <= 0) break;
+    const page = await env.img_url.list({
+      limit: Math.max(1, Math.min(1000, remaining)),
+      cursor,
+      prefix: prefix || undefined,
+    });
     allKeys.push(...(page.keys || []));
     cursor = page.list_complete ? undefined : page.cursor;
     guard += 1;
-  } while (cursor && guard < 10000);
+  } while (cursor && allKeys.length < maxKeys && guard < 10000);
 
   return allKeys;
 }
@@ -239,7 +245,9 @@ export async function onRequest(context) {
     String(url.searchParams.get('includeFolders') || '').toLowerCase()
   );
 
-  const allKeys = await listAllKeys(env, prefix);
+  const needsFullScan = includeStats || includeFolders || storageFilter || folderFilter || sort || prefix;
+  const scanLimit = needsFullScan ? Infinity : offset + limit;
+  const allKeys = await listAllKeys(env, prefix, scanLimit);
   const folderMarkers = allKeys.filter(isFolderMarker);
 
   const normalizedFiles = allKeys
