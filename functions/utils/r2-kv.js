@@ -192,6 +192,7 @@ export function createR2BackedKvNamespace({ bucket, fallbackKv, env }) {
 
     async list(options = {}) {
       const all = [];
+      const candidates = [];
       const requestedPrefix = String(options.prefix || "");
       const limit = Math.max(1, Math.min(Number(options.limit || 1000), 1000));
       const cursorOffset = Math.max(0, Number.parseInt(String(options.cursor || "0"), 10) || 0);
@@ -203,17 +204,22 @@ export function createR2BackedKvNamespace({ bucket, fallbackKv, env }) {
         for (const object of page.objects || []) {
           const key = objectNameToKey(prefix, object.key);
           if (!key || (requestedPrefix && !key.startsWith(requestedPrefix))) continue;
-          const envelope = await getEnvelope(key);
-          if (!envelope) continue;
-          all.push({
-            name: key,
-            metadata: envelope.metadata ?? null,
-            expiration: envelope.expiration ?? undefined,
-          });
-          if (all.length >= targetCount) break;
+          candidates.push(key);
+          if (candidates.length >= targetCount) break;
         }
         cursor = page.truncated ? page.cursor : undefined;
-      } while (cursor && all.length < targetCount);
+      } while (cursor && candidates.length < targetCount);
+
+      const envelopes = await mapConcurrent(candidates, 25, async (key) => {
+        const envelope = await getEnvelope(key);
+        if (!envelope) return null;
+        return {
+          name: key,
+          metadata: envelope.metadata ?? null,
+          expiration: envelope.expiration ?? undefined,
+        };
+      });
+      all.push(...envelopes.filter(Boolean));
 
       all.sort((left, right) => left.name.localeCompare(right.name));
       const slice = all.slice(cursorOffset, cursorOffset + limit);
@@ -225,6 +231,20 @@ export function createR2BackedKvNamespace({ bucket, fallbackKv, env }) {
       };
     },
   };
+}
+
+async function mapConcurrent(items, concurrency, worker) {
+  const results = [];
+  let next = 0;
+  const runners = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+    while (next < items.length) {
+      const index = next;
+      next += 1;
+      results[index] = await worker(items[index], index);
+    }
+  });
+  await Promise.all(runners);
+  return results;
 }
 
 export function installR2MetadataStore(context) {
