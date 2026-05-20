@@ -12,6 +12,9 @@ import {
 
 const STORAGE_PREFIXES = ['img:', 'vid:', 'aud:', 'doc:', 'r2:', 's3:', 'discord:', 'hf:', 'webdav:', 'github:', ''];
 
+const DEFAULT_BROWSER_CACHE_TTL = 24 * 60 * 60;
+const DEFAULT_EDGE_CACHE_TTL = 30 * 24 * 60 * 60;
+
 const MIME_TYPES = {
   mp4: 'video/mp4',
   webm: 'video/webm',
@@ -94,6 +97,12 @@ export async function onRequest(context) {
       }
     }
 
+    const cacheOptions = getFileCacheOptions(context, shareAccess);
+    if (cacheOptions) {
+      const cachedResponse = await readCachedFileResponse(cacheOptions);
+      if (cachedResponse) return cachedResponse;
+    }
+
     const storageType = inferStorageType(fileId, record?.metadata || {});
     let response;
     if (storageType === 'r2') {
@@ -119,6 +128,10 @@ export async function onRequest(context) {
       } else {
         updatePromise.catch(() => {});
       }
+    }
+
+    if (cacheOptions) {
+      response = await writeCachedFileResponse(context, cacheOptions, response) || response;
     }
 
     return response;
@@ -152,14 +165,33 @@ function addCorsHeaders(headers) {
   headers.set('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
   headers.set('Access-Control-Allow-Headers', 'Range, Content-Type, Accept, Origin');
   headers.set('Access-Control-Expose-Headers', 'Content-Length, Content-Range, Accept-Ranges, Content-Type, Content-Disposition');
-  headers.set('CDN-Cache-Control', 'no-store');
   return headers;
 }
 
-function addResponseHeaders(headers, fileName, mimeType, upstream = null) {
+function addCacheHeaders(headers, browserTtl = DEFAULT_BROWSER_CACHE_TTL, edgeTtl = DEFAULT_EDGE_CACHE_TTL) {
+  headers.set('Cache-Control', `public, max-age=${browserTtl}, stale-while-revalidate=86400`);
+  headers.set('CDN-Cache-Control', `public, max-age=${edgeTtl}`);
+  headers.set('Cloudflare-CDN-Cache-Control', `public, max-age=${edgeTtl}`);
+}
+
+function addNoStoreHeaders(headers) {
+  headers.set('Cache-Control', 'no-store, max-age=0');
+  headers.set('CDN-Cache-Control', 'no-store');
+  headers.set('Cloudflare-CDN-Cache-Control', 'no-store');
+}
+
+function addResponseHeaders(headers, fileName, mimeType, upstream = null, cacheOptions = {}) {
   addCorsHeaders(headers);
   headers.set('Content-Type', mimeType || 'application/octet-stream');
-  headers.set('Cache-Control', 'no-store, max-age=0');
+  if (upstream?.status === 206) {
+    addNoStoreHeaders(headers);
+  } else {
+    addCacheHeaders(
+      headers,
+      cacheOptions.browserTtl || DEFAULT_BROWSER_CACHE_TTL,
+      cacheOptions.edgeTtl || DEFAULT_EDGE_CACHE_TTL
+    );
+  }
   headers.set('Accept-Ranges', 'bytes');
 
   if (fileName) {
@@ -185,8 +217,74 @@ function handleOptions() {
 function errorResponse(message, status = 500) {
   const headers = new Headers();
   addCorsHeaders(headers);
-  headers.set('Cache-Control', 'no-store, max-age=0');
+  addNoStoreHeaders(headers);
   return new Response(message, { status, headers });
+}
+
+function parsePositiveInteger(value, fallback) {
+  const parsed = Number.parseInt(String(value ?? ''), 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  return parsed;
+}
+
+function getFileCacheOptions(context, shareAccess = null) {
+  const { request, env } = context;
+  if (String(env?.FILE_CACHE_ENABLED || 'true').toLowerCase() === 'false') return null;
+  if (String(request.method || '').toUpperCase() !== 'GET') return null;
+  if (request.headers.has('Range')) return null;
+  if (shareAccess?.trackDownload) return null;
+
+  const url = new URL(request.url);
+  const hasShareCredential = url.searchParams.has('password')
+    || request.headers.has('X-File-Password')
+    || request.headers.has('X-Share-Password');
+  if (hasShareCredential) return null;
+
+  return {
+    key: new Request(url.toString(), { method: 'GET' }),
+    browserTtl: parsePositiveInteger(env?.FILE_CACHE_BROWSER_TTL, DEFAULT_BROWSER_CACHE_TTL),
+    edgeTtl: parsePositiveInteger(env?.FILE_CACHE_EDGE_TTL, DEFAULT_EDGE_CACHE_TTL),
+  };
+}
+
+async function readCachedFileResponse(cacheOptions) {
+  if (!globalThis.caches?.default) return null;
+  const cached = await caches.default.match(cacheOptions.key);
+  if (!cached) return null;
+
+  const headers = new Headers(cached.headers);
+  headers.set('X-K-Vault-Cache', 'HIT');
+  return new Response(cached.body, {
+    status: cached.status,
+    statusText: cached.statusText,
+    headers,
+  });
+}
+
+async function writeCachedFileResponse(context, cacheOptions, response) {
+  if (!globalThis.caches?.default) return;
+  if (!response || response.status !== 200) return;
+  if (response.headers.has('Set-Cookie')) return;
+
+  const headers = new Headers(response.headers);
+  addCacheHeaders(headers, cacheOptions.browserTtl, cacheOptions.edgeTtl);
+  headers.set('X-K-Vault-Cache', 'MISS');
+
+  const cacheableResponse = new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
+  const responseForClient = cacheableResponse.clone();
+  const cachePut = caches.default.put(cacheOptions.key, cacheableResponse.clone());
+  if (typeof context.waitUntil === 'function') {
+    context.waitUntil(cachePut.catch((error) => {
+      console.warn('file cache put failed:', error?.message || error);
+    }));
+  } else {
+    await cachePut;
+  }
+  return responseForClient;
 }
 
 function shouldBlock(metadata = {}) {
