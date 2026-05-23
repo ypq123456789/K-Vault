@@ -350,3 +350,41 @@ describe('API v1 file share limits', function () {
     assert.strictEqual(Number(record?.metadata?.shareDownloadCount || 0), 1);
   });
 });
+
+describe('API v1 upload proxy', function () {
+  it('rebuilds uploaded files into reusable bodies before forwarding', async function () {
+    const { onRequestPost } = await import('../functions/api/v1/upload.js');
+    const env = {
+      img_url: new MemoryKV(),
+      R2_BUCKET: new MemoryR2(),
+      disable_telemetry: '1',
+    };
+
+    const formData = new FormData();
+    formData.append(
+      'file',
+      new File([new Uint8Array([137, 80, 78, 71])], 'avatar.png', { type: 'image/png' })
+    );
+    formData.append('storage', 'r2');
+
+    const request = new Request('https://example.com/api/v1/upload?storage=r2', {
+      method: 'POST',
+      body: formData,
+    });
+
+    const response = await onRequestPost({
+      request,
+      env,
+      data: { apiToken: { id: 'test-token' } },
+      next: () => new Response('ok'),
+      waitUntil: () => {},
+    });
+    const payload = await parseJson(response);
+
+    assert.strictEqual(response.status, 200);
+    assert.strictEqual(payload.success, true);
+    assert.strictEqual(payload.file.name, 'avatar.png');
+    assert.strictEqual(payload.file.storage, 'r2');
+    assert.ok(payload.links.download.includes('/file/r2%3A'));
+  });
+});

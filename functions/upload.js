@@ -1,4 +1,4 @@
-﻿import { errorHandling, telemetryData } from "./utils/middleware";
+﻿import { errorHandling, telemetryData } from "./utils/middleware.js";
 import { checkAuthentication, isAuthRequired } from "./utils/auth.js";
 import { checkGuestUpload, incrementGuestCount } from "./utils/guest.js";
 import { createS3Client } from "./utils/s3client.js";
@@ -21,11 +21,14 @@ export async function onRequestPost(context) {
   const { request, env } = context;
 
   try {
+    const isApiTokenRequest = Boolean(context?.data?.apiToken);
+    if (!isApiTokenRequest) {
+      await errorHandling(context);
+      telemetryData(context);
+    }
+
     const clonedRequest = request.clone();
     const formData = await clonedRequest.formData();
-
-    await errorHandling(context);
-    telemetryData(context);
 
     const uploadFile = formData.get("file");
     if (!uploadFile) {
@@ -37,7 +40,6 @@ export async function onRequestPost(context) {
     const folderPath = normalizeFolderPath(formData.get("folderPath"));
 
     // API v1 token-authenticated requests should bypass guest limits.
-    const isApiTokenRequest = Boolean(context?.data?.apiToken);
     const isAdmin = isApiTokenRequest || await isUserAuthenticated(context);
     if (!isAdmin) {
       const guestCheck = await checkGuestUpload(request, env, uploadFile.size);

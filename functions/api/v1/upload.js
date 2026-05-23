@@ -186,6 +186,27 @@ function resolveUploadErrorStatus(status, message) {
   return 500;
 }
 
+async function createReusableUploadValue(value) {
+  const isFile = typeof File === 'function' && value instanceof File;
+  const isBlob = typeof Blob === 'function' && value instanceof Blob;
+  if (!isFile && !isBlob) {
+    return value;
+  }
+
+  const bytes = await value.arrayBuffer();
+  const type = value.type || 'application/octet-stream';
+  const name = value.name || 'upload.bin';
+
+  if (typeof File === 'function') {
+    return new File([bytes], name, {
+      type,
+      lastModified: value.lastModified || Date.now(),
+    });
+  }
+
+  return new Blob([bytes], { type });
+}
+
 export async function onRequestPost(context) {
   const { request, env } = context;
 
@@ -215,7 +236,16 @@ export async function onRequestPost(context) {
   const uploadForm = new FormData();
   for (const [key, value] of formData.entries()) {
     if (key === 'storage') continue;
-    uploadForm.append(key, value);
+    const reusableValue = await createReusableUploadValue(value);
+    const isBlobWithoutFile =
+      typeof Blob === 'function' &&
+      reusableValue instanceof Blob &&
+      !(typeof File === 'function' && reusableValue instanceof File);
+    if (isBlobWithoutFile && value?.name) {
+      uploadForm.append(key, reusableValue, value.name);
+    } else {
+      uploadForm.append(key, reusableValue);
+    }
   }
   if (storage) {
     uploadForm.set('storageMode', storage);
