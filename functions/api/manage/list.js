@@ -63,9 +63,13 @@ function normalizeKey(key) {
   const storageType = inferStorageType(key.name, metadata);
   const fileType = inferFileType(key.name, metadata);
   const folderPath = normalizeFolderPath(metadata.folderPath || metadata.path || '');
+  const name = storageType === 'r2' && metadata.r2Key
+    ? `r2:${String(metadata.r2Key).replace(/^r2:/, '')}`
+    : key.name;
 
   return {
     ...key,
+    name,
     metadata: {
       ...metadata,
       storageType,
