@@ -245,8 +245,9 @@ export async function onRequest(context) {
     String(url.searchParams.get('includeFolders') || '').toLowerCase()
   );
 
+  const r2MetadataMode = String(env.METADATA_STORE || env.KV_BACKEND || '').trim().toLowerCase() === 'r2';
   const needsFullScan = includeStats || includeFolders || storageFilter || folderFilter || sort || prefix;
-  const scanLimit = needsFullScan ? Infinity : offset + limit;
+  const scanLimit = r2MetadataMode ? offset + limit : (needsFullScan ? Infinity : offset + limit);
   const allKeys = await listAllKeys(env, prefix, scanLimit);
   const folderMarkers = allKeys.filter(isFolderMarker);
 
@@ -273,7 +274,7 @@ export async function onRequest(context) {
     list_complete: nextOffset == null,
   };
 
-  if (includeStats) {
+  if (includeStats && !r2MetadataMode) {
     payload.stats = computeStats(filtered);
   }
 

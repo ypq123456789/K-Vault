@@ -1,6 +1,11 @@
 name = "k-vault"
 main = "src/worker.js"
 compatibility_date = "2026-05-16"
+workers_dev = true
+
+[[routes]]
+pattern = "image1.bacon159.pp.ua/*"
+zone_name = "bacon159.pp.ua"
 
 [assets]
 directory = "."
@@ -16,6 +21,7 @@ binding = "R2_BUCKET"
 bucket_name = "k-vault-files"
 
 [vars]
+BASIC_USER = "bacon"
 DEFAULT_STORAGE_TYPE = "r2"
 METADATA_R2_FALLBACK_READ = "true"
 METADATA_R2_LAZY_MIGRATE = "true"
