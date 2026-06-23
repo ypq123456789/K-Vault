@@ -32,82 +32,85 @@ export async function onRequest(context) {
   const dryRun = url.searchParams.get('dry') === '1';
 
   try {
-    // Step 1: List all R2 objects with kv/ prefix
-    const objects = [];
+    // Step 1: List R2 objects in pages and process incrementally
+    const now = Date.now();
+    let totalObjects = 0;
+    let inserted = 0;
+    const errors = [];
+    const insertErrors = [];
     let cursor = undefined;
     let listCalls = 0;
+    const sampleKeys = [];
+
     do {
-      const page = await env.R2_BUCKET.list({ prefix: R2_PREFIX, cursor, limit: 1000 });
-      for (const obj of page.objects || []) {
-        objects.push(obj);
+      const page = await env.R2_BUCKET.list({ prefix: R2_PREFIX, cursor, limit: 100 });
+      const objects = page.objects || [];
+      totalObjects += objects.length;
+
+      // Process this page immediately
+      const statements = [];
+      for (const obj of objects) {
+        try {
+          const body = await obj.text();
+          let envelope;
+          try { envelope = JSON.parse(body); } catch { continue; }
+          if (!envelope || envelope.__kvEnvelope !== 1) continue;
+
+          const objectName = obj.key;
+          if (!objectName.startsWith(R2_PREFIX) || !objectName.endsWith('.json')) continue;
+          const encodedKey = objectName.slice(R2_PREFIX.length, -'.json'.length);
+
+          let decodedKey;
+          try {
+            const base64 = encodedKey.replace(/-/g, '+').replace(/_/g, '/');
+            const padded = base64 + '='.repeat((4 - (base64.length % 4 || 4)) % 4);
+            const binary = atob(padded);
+            const bytes = new Uint8Array(binary.length);
+            for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+            decodedKey = new TextDecoder().decode(bytes);
+          } catch { continue; }
+
+          if (sampleKeys.length < 10) sampleKeys.push(decodedKey);
+
+          statements.push({
+            key: decodedKey,
+            envelopeJson: JSON.stringify(envelope),
+            metadataJson: JSON.stringify(envelope.metadata ?? {}),
+            expiresAt: envelope.expiration ? envelope.expiration * 1000 : null,
+          });
+        } catch (e) {
+          errors.push({ key: obj.key, error: e.message });
+        }
       }
+
+      // Insert this batch into D1
+      if (!dryRun && statements.length > 0) {
+        for (let i = 0; i < statements.length; i += D1_BATCH_SIZE) {
+          const batch = statements.slice(i, i + D1_BATCH_SIZE);
+          try {
+            const batchStmts = batch.map(s =>
+              env.DB.prepare(
+                "INSERT OR IGNORE INTO kv_store (key, value, metadata_json, created_at, updated_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)"
+              ).bind(s.key, s.envelopeJson, s.metadataJson, now, now, s.expiresAt)
+            );
+            await env.DB.batch(batchStmts);
+            inserted += batch.length;
+          } catch (e) {
+            insertErrors.push({ batchStart: i, error: e.message });
+          }
+        }
+      }
+
       cursor = page.truncated ? page.cursor : undefined;
       listCalls += 1;
-    } while (cursor && listCalls < 100);
-
-    // Step 2: Read each object and build records
-    const now = Date.now();
-    const statements = [];
-    const errors = [];
-
-    for (const obj of objects) {
-      try {
-        const body = await obj.text();
-        let envelope;
-        try { envelope = JSON.parse(body); } catch { continue; }
-        if (!envelope || envelope.__kvEnvelope !== 1) continue;
-
-        const objectName = obj.key;
-        if (!objectName.startsWith(R2_PREFIX) || !objectName.endsWith('.json')) continue;
-        const encodedKey = objectName.slice(R2_PREFIX.length, -'.json'.length);
-
-        let key;
-        try {
-          const base64 = encodedKey.replace(/-/g, '+').replace(/_/g, '/');
-          const padded = base64 + '='.repeat((4 - (base64.length % 4 || 4)) % 4);
-          const binary = atob(padded);
-          const bytes = new Uint8Array(binary.length);
-          for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
-          key = new TextDecoder().decode(bytes);
-        } catch { continue; }
-
-        const envelopeJson = JSON.stringify(envelope);
-        const metadataJson = JSON.stringify(envelope.metadata ?? {});
-        const expiresAt = envelope.expiration ? envelope.expiration * 1000 : null;
-
-        statements.push({ key, envelopeJson, metadataJson, expiresAt });
-      } catch (e) {
-        errors.push({ key: obj.key, error: e.message });
-      }
-    }
+    } while (cursor && listCalls < 200);
 
     if (dryRun) {
       return jsonResponse({
         dryRun: true,
-        r2Objects: objects.length,
-        validRecords: statements.length,
-        errors: errors.length,
-        sampleKeys: statements.slice(0, 10).map(s => s.key),
+        r2Objects: totalObjects,
+        sampleKeys,
       });
-    }
-
-    // Step 3: Insert into D1 in batches
-    let inserted = 0;
-    const insertErrors = [];
-
-    for (let i = 0; i < statements.length; i += D1_BATCH_SIZE) {
-      const batch = statements.slice(i, i + D1_BATCH_SIZE);
-      try {
-        const batchStmts = batch.map(s =>
-          env.DB.prepare(
-            "INSERT OR IGNORE INTO kv_store (key, value, metadata_json, created_at, updated_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)"
-          ).bind(s.key, s.envelopeJson, s.metadataJson, now, now, s.expiresAt)
-        );
-        await env.DB.batch(batchStmts);
-        inserted += batch.length;
-      } catch (e) {
-        insertErrors.push({ batchStart: i, error: e.message });
-      }
     }
 
     // Verify
@@ -118,8 +121,7 @@ export async function onRequest(context) {
     } catch {}
 
     return jsonResponse({
-      r2Objects: objects.length,
-      validRecords: statements.length,
+      r2Objects: totalObjects,
       inserted,
       d1Count,
       errors: errors.length,
