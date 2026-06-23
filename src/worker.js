@@ -12,6 +12,7 @@ import * as apiAdminMiddleware from "../functions/api/admin/_middleware.js";
 import * as apiAdminTokensRoute from "../functions/api/admin/tokens.js";
 import * as apiAdminTokenRoute from "../functions/api/admin/tokens/[id].js";
 import * as apiAdminMigrateR2D1Route from "../functions/api/admin/migrate_r2_d1.js";
+import * as apiMigrateRoute from "../functions/api/migrate.js";
 import * as apiAuthCheckRoute from "../functions/api/auth/check.js";
 import * as apiAuthLoginRoute from "../functions/api/auth/login.js";
 import * as apiAuthLogoutRoute from "../functions/api/auth/logout.js";
@@ -54,6 +55,7 @@ const routes = [
   route("/api/admin/tokens", apiAdminTokensRoute, [apiMiddleware, apiAdminMiddleware]),
   route("/api/admin/tokens/:id", apiAdminTokenRoute, [apiMiddleware, apiAdminMiddleware]),
   route("/api/admin/migrate_r2_d1", apiAdminMigrateR2D1Route, [apiMiddleware, apiAdminMiddleware]),
+  route("/api/migrate", apiMigrateRoute, [apiMiddleware]),
   route("/api/auth/check", apiAuthCheckRoute, [apiMiddleware]),
   route("/api/auth/login", apiAuthLoginRoute, [apiMiddleware]),
   route("/api/auth/logout", apiAuthLogoutRoute, [apiMiddleware]),
