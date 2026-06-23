@@ -38,7 +38,9 @@ export async function onRequest(context) {
       const samples = [];
       for (const obj of page.objects || []) {
         try {
-          const body = await obj.text();
+          const fullObj = await env.R2_BUCKET.get(obj.key);
+          if (!fullObj) { samples.push({ key: obj.key, error: 'get returned null' }); continue; }
+          const body = await fullObj.text();
           const parsed = JSON.parse(body);
           samples.push({
             key: obj.key,
@@ -72,7 +74,9 @@ export async function onRequest(context) {
       const statements = [];
       for (const obj of objects) {
         try {
-          const body = await obj.text();
+          const fullObj = await env.R2_BUCKET.get(obj.key);
+          if (!fullObj) continue;
+          const body = await fullObj.text();
           let envelope;
           try { envelope = JSON.parse(body); } catch { continue; }
           if (!envelope || envelope.__kvEnvelope !== 1) continue;
