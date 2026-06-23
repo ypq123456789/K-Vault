@@ -20,6 +20,11 @@ id = "5fe31f18133246fab97ea71a962eea59"
 binding = "R2_BUCKET"
 bucket_name = "k-vault-files"
 
+[[d1_databases]]
+binding = "DB"
+database_name = "k-vault-metadata"
+database_id = "d1bd1159-8a1c-434a-9e54-5ea869307c83"
+
 [vars]
 BASIC_USER = "bacon"
 DEFAULT_STORAGE_TYPE = "r2"
@@ -28,7 +33,7 @@ GITHUB_REPO = "ypq123456789/kvault-files"
 METADATA_R2_FALLBACK_READ = "true"
 METADATA_R2_LAZY_MIGRATE = "false"
 METADATA_R2_PREFIX = "kv/"
-METADATA_STORE = "r2"
+METADATA_STORE = "d1"
 MINIMIZE_KV_WRITES = "true"
 S3_BUCKET = "hi168-19275-07130td3"
 S3_ENDPOINT = "https://s3.hi168.com"
