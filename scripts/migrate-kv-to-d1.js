@@ -22,7 +22,7 @@ async function main() {
   console.log("Mode: " + (DRY_RUN ? "DRY RUN" : "LIVE"));
   console.log("");
   console.log("Step 1: Listing all KV keys...");
-  var kvListJson = run("wrangler kv key list --binding img_url --prefix \"\" --limit 100000");
+  var kvListJson = run("wrangler kv key list --binding img_url --prefix \"\"");
   var kvKeys = JSON.parse(kvListJson);
   console.log("  Found " + kvKeys.length + " keys.");
   console.log("Step 2: Fetching values and metadata...");
@@ -64,7 +64,7 @@ async function main() {
     var sqlFile = path.join(tmpDir, "batch_" + Math.floor(i / BATCH_SIZE) + ".sql");
     fs.writeFileSync(sqlFile, batch.join(";\n") + ";", "utf8");
     try {
-      run("wrangler d1 execute k-vault-metadata --file \"" + sqlFile + "\"");
+      run("wrangler d1 execute k-vault-metadata --remote --file \"" + sqlFile + "\"");
       executed += batch.length;
       if (executed % 200 === 0) console.log("  Progress: " + executed + "/" + stmts.length);
     } catch (e) {
@@ -76,7 +76,7 @@ async function main() {
   console.log("Records migrated: " + executed + "/" + stmts.length);
   console.log("Step 5: Verifying...");
   try {
-    var cnt = run("wrangler d1 execute k-vault-metadata --command \"SELECT COUNT(*) as cnt FROM kv_store\"");
+    var cnt = run("wrangler d1 execute k-vault-metadata --remote --command \"SELECT COUNT(*) as cnt FROM kv_store\"");
     console.log("  D1 row count: " + cnt);
     console.log("  KV key count: " + kvKeys.length);
   } catch (e) {
