@@ -32,6 +32,27 @@ export async function onRequest(context) {
   const dryRun = url.searchParams.get('dry') === '1';
 
   try {
+    // Debug mode: return info about first few objects
+    if (url.searchParams.get('debug') === '1') {
+      const page = await env.R2_BUCKET.list({ prefix: R2_PREFIX, limit: 5 });
+      const samples = [];
+      for (const obj of page.objects || []) {
+        try {
+          const body = await obj.text();
+          const parsed = JSON.parse(body);
+          samples.push({
+            key: obj.key,
+            size: obj.size,
+            hasEnvelope: parsed && parsed.__kvEnvelope === 1,
+            keys: Object.keys(parsed || {}).slice(0, 10),
+          });
+        } catch (e) {
+          samples.push({ key: obj.key, error: e.message });
+        }
+      }
+      return jsonResponse({ debug: true, totalInPage: (page.objects || []).length, samples });
+    }
+
     // Step 1: List R2 objects in pages and process incrementally
     const now = Date.now();
     let totalObjects = 0;
