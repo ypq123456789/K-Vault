@@ -1,14 +1,18 @@
 /**
- * R2 -> D1 migration endpoint (standalone, no admin middleware)
- * GET /api/migrate?key=<SECRET>&dry=1  (dry run)
- * GET /api/migrate?key=<SECRET>         (execute migration)
+ * R2 -> D1 migration endpoint (paginated)
+ * GET /api/migrate?key=SECRET&dry=1          (dry run: first page only)
+ * GET /api/migrate?key=SECRET                (execute: first page)
+ * GET /api/migrate?key=SECRET&cursor=XXX     (execute: next page)
+ *
+ * Each call processes one R2 listing page (up to 100 objects).
+ * Returns the cursor for the next call. Repeat until listComplete=true.
  *
  * IMPORTANT: Delete this file after migration is complete.
  */
 
 const MIGRATION_SECRET = 'k-vault-migrate-2026';
 const R2_PREFIX = 'kv/';
-const D1_BATCH_SIZE = 50;
+const PAGE_SIZE = 100;
 
 export async function onRequest(context) {
   const { request, env } = context;
@@ -16,148 +20,107 @@ export async function onRequest(context) {
   const key = url.searchParams.get('key');
 
   if (key !== MIGRATION_SECRET) {
-    return new Response(JSON.stringify({ error: 'Invalid migration key' }), {
-      status: 401,
-      headers: { 'Content-Type': 'application/json' },
-    });
+    return jr({ error: 'Invalid migration key' }, 401);
   }
-
-  if (!env.R2_BUCKET) {
-    return jsonResponse({ error: 'R2_BUCKET not configured' }, 500);
-  }
-  if (!env.DB) {
-    return jsonResponse({ error: 'DB (D1) not configured' }, 500);
-  }
+  if (!env.R2_BUCKET) return jr({ error: 'R2_BUCKET not configured' }, 500);
+  if (!env.DB) return jr({ error: 'DB (D1) not configured' }, 500);
 
   const dryRun = url.searchParams.get('dry') === '1';
+  const cursor = url.searchParams.get('cursor') || undefined;
 
   try {
-    // Debug mode: return info about first few objects
-    if (url.searchParams.get('debug') === '1') {
-      const page = await env.R2_BUCKET.list({ prefix: R2_PREFIX, limit: 5 });
-      const samples = [];
-      for (const obj of page.objects || []) {
-        try {
-          const fullObj = await env.R2_BUCKET.get(obj.key);
-          if (!fullObj) { samples.push({ key: obj.key, error: 'get returned null' }); continue; }
-          const body = await fullObj.text();
-          const parsed = JSON.parse(body);
-          samples.push({
-            key: obj.key,
-            size: obj.size,
-            hasEnvelope: parsed && parsed.__kvEnvelope === 1,
-            keys: Object.keys(parsed || {}).slice(0, 10),
-          });
-        } catch (e) {
-          samples.push({ key: obj.key, error: e.message });
-        }
-      }
-      return jsonResponse({ debug: true, totalInPage: (page.objects || []).length, samples });
-    }
-
-    // Step 1: List R2 objects in pages and process incrementally
-    const now = Date.now();
-    let totalObjects = 0;
-    let inserted = 0;
-    const errors = [];
-    const insertErrors = [];
-    let cursor = undefined;
-    let listCalls = 0;
-    const sampleKeys = [];
-
-    do {
-      const page = await env.R2_BUCKET.list({ prefix: R2_PREFIX, cursor, limit: 100 });
-      const objects = page.objects || [];
-      totalObjects += objects.length;
-
-      // Process this page immediately
-      const statements = [];
-      for (const obj of objects) {
-        try {
-          const fullObj = await env.R2_BUCKET.get(obj.key);
-          if (!fullObj) continue;
-          const body = await fullObj.text();
-          let envelope;
-          try { envelope = JSON.parse(body); } catch { continue; }
-          if (!envelope || envelope.__kvEnvelope !== 1) continue;
-
-          const objectName = obj.key;
-          if (!objectName.startsWith(R2_PREFIX) || !objectName.endsWith('.json')) continue;
-          const encodedKey = objectName.slice(R2_PREFIX.length, -'.json'.length);
-
-          let decodedKey;
-          try {
-            const base64 = encodedKey.replace(/-/g, '+').replace(/_/g, '/');
-            const padded = base64 + '='.repeat((4 - (base64.length % 4 || 4)) % 4);
-            const binary = atob(padded);
-            const bytes = new Uint8Array(binary.length);
-            for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
-            decodedKey = new TextDecoder().decode(bytes);
-          } catch { continue; }
-
-          if (sampleKeys.length < 10) sampleKeys.push(decodedKey);
-
-          statements.push({
-            key: decodedKey,
-            envelopeJson: JSON.stringify(envelope),
-            metadataJson: JSON.stringify(envelope.metadata ?? {}),
-            expiresAt: envelope.expiration ? envelope.expiration * 1000 : null,
-          });
-        } catch (e) {
-          errors.push({ key: obj.key, error: e.message });
-        }
-      }
-
-      // Insert this batch into D1
-      if (!dryRun && statements.length > 0) {
-        for (let i = 0; i < statements.length; i += D1_BATCH_SIZE) {
-          const batch = statements.slice(i, i + D1_BATCH_SIZE);
-          try {
-            const batchStmts = batch.map(s =>
-              env.DB.prepare(
-                "INSERT OR IGNORE INTO kv_store (key, value, metadata_json, created_at, updated_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)"
-              ).bind(s.key, s.envelopeJson, s.metadataJson, now, now, s.expiresAt)
-            );
-            await env.DB.batch(batchStmts);
-            inserted += batch.length;
-          } catch (e) {
-            insertErrors.push({ batchStart: i, error: e.message });
-          }
-        }
-      }
-
-      cursor = page.truncated ? page.cursor : undefined;
-      listCalls += 1;
-    } while (cursor && listCalls < 200);
+    // List one page of R2 objects
+    const page = await env.R2_BUCKET.list({ prefix: R2_PREFIX, cursor, limit: PAGE_SIZE });
+    const objects = page.objects || [];
+    const nextCursor = page.truncated ? page.cursor : null;
 
     if (dryRun) {
-      return jsonResponse({
+      return jr({
         dryRun: true,
-        r2Objects: totalObjects,
-        sampleKeys,
+        pageObjects: objects.length,
+        listComplete: !page.truncated,
+        nextCursor,
+        sampleKeys: objects.slice(0, 3).map(o => o.key),
       });
     }
 
-    // Verify
+    // Read each object, decode, insert into D1
+    const now = Date.now();
+    let inserted = 0;
+    const errors = [];
+    const statements = [];
+
+    for (const obj of objects) {
+      try {
+        const fullObj = await env.R2_BUCKET.get(obj.key);
+        if (!fullObj) continue;
+        const body = await fullObj.text();
+        let envelope;
+        try { envelope = JSON.parse(body); } catch { continue; }
+        if (!envelope || envelope.__kvEnvelope !== 1) continue;
+
+        const on = obj.key;
+        if (!on.startsWith(R2_PREFIX) || !on.endsWith('.json')) continue;
+        const encoded = on.slice(R2_PREFIX.length, -'.json'.length);
+
+        let decodedKey;
+        try {
+          const b64 = encoded.replace(/-/g, '+').replace(/_/g, '/');
+          const pad = b64 + '='.repeat((4 - (b64.length % 4 || 4)) % 4);
+          const bin = atob(pad);
+          const bytes = new Uint8Array(bin.length);
+          for (let i = 0; i < bin.length; i += 1) bytes[i] = bin.charCodeAt(i);
+          decodedKey = new TextDecoder().decode(bytes);
+        } catch { continue; }
+
+        statements.push({
+          key: decodedKey,
+          ej: JSON.stringify(envelope),
+          mj: JSON.stringify(envelope.metadata ?? {}),
+          exp: envelope.expiration ? envelope.expiration * 1000 : null,
+        });
+      } catch (e) {
+        errors.push({ key: obj.key, error: e.message });
+      }
+    }
+
+    // Batch insert into D1
+    if (statements.length > 0) {
+      const BATCH = 50;
+      for (let i = 0; i < statements.length; i += BATCH) {
+        const batch = statements.slice(i, i + BATCH);
+        const stmts = batch.map(s =>
+          env.DB.prepare(
+            "INSERT OR IGNORE INTO kv_store (key, value, metadata_json, created_at, updated_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)"
+          ).bind(s.key, s.ej, s.mj, now, now, s.exp)
+        );
+        await env.DB.batch(stmts);
+        inserted += batch.length;
+      }
+    }
+
+    // Get D1 count
     let d1Count = 0;
     try {
-      const countResult = await env.DB.prepare("SELECT COUNT(*) as cnt FROM kv_store").first();
-      d1Count = countResult?.cnt || 0;
+      const r = await env.DB.prepare("SELECT COUNT(*) as cnt FROM kv_store").first();
+      d1Count = r?.cnt || 0;
     } catch {}
 
-    return jsonResponse({
-      r2Objects: totalObjects,
+    return jr({
+      pageObjects: objects.length,
+      pageDecoded: statements.length,
       inserted,
       d1Count,
       errors: errors.length,
-      insertErrors: insertErrors.length,
+      listComplete: !page.truncated,
+      nextCursor,
     });
   } catch (e) {
-    return jsonResponse({ error: e.message, stack: e.stack }, 500);
+    return jr({ error: e.message }, 500);
   }
 }
 
-function jsonResponse(body, status = 200) {
+function jr(body, status = 200) {
   return new Response(JSON.stringify(body), {
     status,
     headers: { 'Content-Type': 'application/json' },
