@@ -325,9 +325,9 @@ export async function onRequestPost(context) {
       uploadedAt: new Date(uploadedAtValue).toISOString(),
     },
     links: {
-      download: buildAbsoluteUrl(request, `/file/${encodeURIComponent(publicId)}`),
-      share: buildAbsoluteUrl(request, `/s/${encodeURIComponent(shareId)}`),
-      delete: buildAbsoluteUrl(request, `/api/v1/file/${encodeURIComponent(canonicalId)}`),
+      download: buildAbsoluteUrl(request, `/file/${encodeURIComponent(publicId)}`, env?.PUBLIC_BASE_URL),
+      share: buildAbsoluteUrl(request, `/s/${encodeURIComponent(shareId)}`, env?.PUBLIC_BASE_URL),
+      delete: buildAbsoluteUrl(request, `/api/v1/file/${encodeURIComponent(canonicalId)}`, env?.PUBLIC_BASE_URL),
     },
   });
 }

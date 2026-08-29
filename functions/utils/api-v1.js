@@ -61,8 +61,10 @@ export function parseBoolean(rawValue, fallback = false) {
   return fallback;
 }
 
-export function buildAbsoluteUrl(request, path) {
-  const origin = new URL(request.url).origin;
+export function buildAbsoluteUrl(request, path, preferredBase = '') {
   const normalizedPath = String(path || '').startsWith('/') ? String(path) : `/${String(path || '')}`;
+  const base = String(preferredBase || '').trim().replace(/\/+$/, '');
+  if (base) return `${base}${normalizedPath}`;
+  const origin = new URL(request.url).origin;
   return `${origin}${normalizedPath}`;
 }
